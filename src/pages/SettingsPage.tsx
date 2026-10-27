@@ -70,6 +70,20 @@ const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint' | 'aiMessageIns
 const getSessionDisplayName = (session: Pick<ChatSession, 'username' | 'displayName'>): string =>
   displayNameOrFallback(session.username, session.displayName)
 
+const getAntiRevokeUnsupportedMessage = (error: unknown): string | undefined => {
+  const message = String(error || '')
+  if (/native database backend opens WeChat's databases read-only/i.test(message)) {
+    return '当前内置 WCDB 后端为只读模式，不支持安装防撤回触发器。请在“数据库连接”中配置包含防撤回接口且支持触发器写入的兼容 WCDB 组件。'
+  }
+  if (message.includes('当前数据服务版本不支持此功能')) {
+    return '当前 WCDB 组件未提供防撤回接口。请配置包含防撤回触发器接口的兼容 WCDB 组件。'
+  }
+  return undefined
+}
+
+const formatAntiRevokeError = (error: unknown, fallback: string): string =>
+  getAntiRevokeUnsupportedMessage(error) || String(error || fallback)
+
 const filteredTabs = tabs.filter(tab => {
   if (tab.id === 'autoDownload') {
     return (window as any).electronAPI.process.platform === 'win32' && (window as any).electronAPI.process.arch === 'x64'
@@ -314,6 +328,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [isAntiRevokeInstalling, setIsAntiRevokeInstalling] = useState(false)
   const [isAntiRevokeUninstalling, setIsAntiRevokeUninstalling] = useState(false)
   const [antiRevokeSummary, setAntiRevokeSummary] = useState<{ action: 'refresh' | 'install' | 'uninstall'; success: number; failed: number } | null>(null)
+  const [antiRevokeUnsupportedMessage, setAntiRevokeUnsupportedMessage] = useState<string | null>(null)
 
   const isClearingCache = isClearingAnalyticsCache || isClearingImageCache || isClearingAllCache
 
@@ -1062,8 +1077,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       markAntiRevokeRowsLoading(targetIds)
 
       const result = await window.electronAPI.chat.checkAntiRevokeTriggers(targetIds)
+      const topLevelUnsupported = getAntiRevokeUnsupportedMessage(result.error)
       if (!result.success || !result.rows) {
-        const errorText = result.error || '防撤回状态检查失败'
+        if (topLevelUnsupported) setAntiRevokeUnsupportedMessage(topLevelUnsupported)
+        const errorText = formatAntiRevokeError(result.error, '防撤回状态检查失败')
         setAntiRevokeStatusMap((prev) => {
           const next = { ...prev }
           for (const sessionId of targetIds) {
@@ -1088,6 +1105,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const mergedRows = targetIds.map((sessionId) => (
         rowMap.get(sessionId) || { sessionId, success: false, error: '状态查询未返回结果' }
       ))
+      const unsupportedMessage = topLevelUnsupported || mergedRows
+        .map((row) => getAntiRevokeUnsupportedMessage(row.error))
+        .find((message): message is string => Boolean(message))
+      setAntiRevokeUnsupportedMessage(unsupportedMessage || null)
       const successCount = mergedRows.filter((row) => row.success).length
       const failedCount = mergedRows.length - successCount
       setAntiRevokeStatusMap((prev) => {
@@ -1098,15 +1119,17 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           next[sessionId] = {
             installed: row.installed === true,
             loading: false,
-            error: row.success ? undefined : (row.error || '状态查询失败')
+            error: row.success ? undefined : formatAntiRevokeError(row.error, '状态查询失败')
           }
         }
         return next
       })
-      setAntiRevokeSummary({ action: 'refresh', success: successCount, failed: failedCount })
-      showMessage(`状态刷新完成：成功 ${successCount}，失败 ${failedCount}`, failedCount === 0)
+      setAntiRevokeSummary(unsupportedMessage ? null : { action: 'refresh', success: successCount, failed: failedCount })
+      showMessage(unsupportedMessage || `状态刷新完成：成功 ${successCount}，失败 ${failedCount}`, !unsupportedMessage && failedCount === 0)
     } catch (e: any) {
-      showMessage(`防撤回状态刷新失败: ${e?.message || String(e)}`, false)
+      const unsupportedMessage = getAntiRevokeUnsupportedMessage(e)
+      if (unsupportedMessage) setAntiRevokeUnsupportedMessage(unsupportedMessage)
+      showMessage(unsupportedMessage || `防撤回状态刷新失败: ${e?.message || String(e)}`, false)
     } finally {
       setIsAntiRevokeRefreshing(false)
     }
@@ -1114,6 +1137,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
   const handleInstallAntiRevokeTriggers = async () => {
     if (isAntiRevokeRefreshing || isAntiRevokeInstalling || isAntiRevokeUninstalling) return
+    if (antiRevokeUnsupportedMessage) {
+      showMessage(antiRevokeUnsupportedMessage, false)
+      return
+    }
     const sessionIds = normalizeSessionIds(Array.from(antiRevokeSelectedIds))
     if (sessionIds.length === 0) {
       showMessage('请先选择至少一个会话', false)
@@ -1124,8 +1151,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     try {
       markAntiRevokeRowsLoading(sessionIds)
       const result = await window.electronAPI.chat.installAntiRevokeTriggers(sessionIds)
+      const topLevelUnsupported = getAntiRevokeUnsupportedMessage(result.error)
       if (!result.success || !result.rows) {
-        const errorText = result.error || '批量安装失败'
+        if (topLevelUnsupported) setAntiRevokeUnsupportedMessage(topLevelUnsupported)
+        const errorText = formatAntiRevokeError(result.error, '批量安装失败')
         setAntiRevokeStatusMap((prev) => {
           const next = { ...prev }
           for (const sessionId of sessionIds) {
@@ -1150,6 +1179,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const mergedRows = sessionIds.map((sessionId) => (
         rowMap.get(sessionId) || { sessionId, success: false, error: '安装未返回结果' }
       ))
+      const unsupportedMessage = topLevelUnsupported || mergedRows
+        .map((row) => getAntiRevokeUnsupportedMessage(row.error))
+        .find((message): message is string => Boolean(message))
+      setAntiRevokeUnsupportedMessage(unsupportedMessage || null)
       const successCount = mergedRows.filter((row) => row.success).length
       const failedCount = mergedRows.length - successCount
       setAntiRevokeStatusMap((prev) => {
@@ -1160,15 +1193,17 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           next[sessionId] = {
             installed: row.success ? true : next[sessionId]?.installed,
             loading: false,
-            error: row.success ? undefined : (row.error || '安装失败')
+            error: row.success ? undefined : formatAntiRevokeError(row.error, '安装失败')
           }
         }
         return next
       })
-      setAntiRevokeSummary({ action: 'install', success: successCount, failed: failedCount })
-      showMessage(`批量安装完成：成功 ${successCount}，失败 ${failedCount}`, failedCount === 0)
+      setAntiRevokeSummary(unsupportedMessage ? null : { action: 'install', success: successCount, failed: failedCount })
+      showMessage(unsupportedMessage || `批量安装完成：成功 ${successCount}，失败 ${failedCount}`, !unsupportedMessage && failedCount === 0)
     } catch (e: any) {
-      showMessage(`批量安装失败: ${e?.message || String(e)}`, false)
+      const unsupportedMessage = getAntiRevokeUnsupportedMessage(e)
+      if (unsupportedMessage) setAntiRevokeUnsupportedMessage(unsupportedMessage)
+      showMessage(unsupportedMessage || `批量安装失败: ${e?.message || String(e)}`, false)
     } finally {
       setIsAntiRevokeInstalling(false)
     }
@@ -1176,6 +1211,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
   const handleUninstallAntiRevokeTriggers = async () => {
     if (isAntiRevokeRefreshing || isAntiRevokeInstalling || isAntiRevokeUninstalling) return
+    if (antiRevokeUnsupportedMessage) {
+      showMessage(antiRevokeUnsupportedMessage, false)
+      return
+    }
     const sessionIds = normalizeSessionIds(Array.from(antiRevokeSelectedIds))
     if (sessionIds.length === 0) {
       showMessage('请先选择至少一个会话', false)
@@ -1186,8 +1225,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     try {
       markAntiRevokeRowsLoading(sessionIds)
       const result = await window.electronAPI.chat.uninstallAntiRevokeTriggers(sessionIds)
+      const topLevelUnsupported = getAntiRevokeUnsupportedMessage(result.error)
       if (!result.success || !result.rows) {
-        const errorText = result.error || '批量卸载失败'
+        if (topLevelUnsupported) setAntiRevokeUnsupportedMessage(topLevelUnsupported)
+        const errorText = formatAntiRevokeError(result.error, '批量卸载失败')
         setAntiRevokeStatusMap((prev) => {
           const next = { ...prev }
           for (const sessionId of sessionIds) {
@@ -1212,6 +1253,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const mergedRows = sessionIds.map((sessionId) => (
         rowMap.get(sessionId) || { sessionId, success: false, error: '卸载未返回结果' }
       ))
+      const unsupportedMessage = topLevelUnsupported || mergedRows
+        .map((row) => getAntiRevokeUnsupportedMessage(row.error))
+        .find((message): message is string => Boolean(message))
+      setAntiRevokeUnsupportedMessage(unsupportedMessage || null)
       const successCount = mergedRows.filter((row) => row.success).length
       const failedCount = mergedRows.length - successCount
       setAntiRevokeStatusMap((prev) => {
@@ -1222,15 +1267,17 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           next[sessionId] = {
             installed: row.success ? false : next[sessionId]?.installed,
             loading: false,
-            error: row.success ? undefined : (row.error || '卸载失败')
+            error: row.success ? undefined : formatAntiRevokeError(row.error, '卸载失败')
           }
         }
         return next
       })
-      setAntiRevokeSummary({ action: 'uninstall', success: successCount, failed: failedCount })
-      showMessage(`批量卸载完成：成功 ${successCount}，失败 ${failedCount}`, failedCount === 0)
+      setAntiRevokeSummary(unsupportedMessage ? null : { action: 'uninstall', success: successCount, failed: failedCount })
+      showMessage(unsupportedMessage || `批量卸载完成：成功 ${successCount}，失败 ${failedCount}`, !unsupportedMessage && failedCount === 0)
     } catch (e: any) {
-      showMessage(`批量卸载失败: ${e?.message || String(e)}`, false)
+      const unsupportedMessage = getAntiRevokeUnsupportedMessage(e)
+      if (unsupportedMessage) setAntiRevokeUnsupportedMessage(unsupportedMessage)
+      showMessage(unsupportedMessage || `批量卸载失败: ${e?.message || String(e)}`, false)
     } finally {
       setIsAntiRevokeUninstalling(false)
     }
@@ -1349,6 +1396,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
   const handleSelectWcdbLibPath = () => handleSelectThirdPartyPath('选择第三方 WCDB 实现库文件', async (path) => {
     setWcdbLibPath(path)
+    setAntiRevokeUnsupportedMessage(null)
     await configService.setWcdbLibPath(path)
   })
   const handleSelectKeyProviderPath = () => handleSelectThirdPartyPath('选择第三方密钥获取工具', async (path) => {
@@ -2336,7 +2384,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         <div className="anti-revoke-hero">
           <div className="anti-revoke-hero-main">
             <h3>防撤回</h3>
-            <p>你可以根据会话进行防撤回部署，安装后无需保持 WeFlow 运行即可实现防撤回</p>
+            <p>此功能通过在微信数据库中安装触发器实现，安装后无需保持 WeFlow 运行。内置 WCDB 为只读实现；如需使用，请配置支持防撤回触发器的兼容 WCDB 组件。</p>
           </div>
           <div className="anti-revoke-metrics">
             <div className="anti-revoke-metric is-total">
@@ -2357,6 +2405,12 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
             </div>
           </div>
         </div>
+
+        {antiRevokeUnsupportedMessage && (
+          <div className="anti-revoke-summary error" role="alert">
+            {antiRevokeUnsupportedMessage}
+          </div>
+        )}
 
         <div className="anti-revoke-control-card">
           <div className="anti-revoke-toolbar">
@@ -2397,10 +2451,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
               <span>对已选会话执行防撤回安装或卸载</span>
             </div>
             <div className="anti-revoke-btn-group anti-revoke-batch-btns">
-              <button className="btn btn-primary btn-sm" onClick={() => void handleInstallAntiRevokeTriggers()} disabled={busy || selectedCount === 0}>
+              <button className="btn btn-primary btn-sm" onClick={() => void handleInstallAntiRevokeTriggers()} disabled={busy || selectedCount === 0 || Boolean(antiRevokeUnsupportedMessage)}>
                 {isAntiRevokeInstalling ? '安装中...' : '批量安装'}
               </button>
-              <button className="btn btn-secondary btn-sm" onClick={() => void handleUninstallAntiRevokeTriggers()} disabled={busy || selectedCount === 0}>
+              <button className="btn btn-secondary btn-sm" onClick={() => void handleUninstallAntiRevokeTriggers()} disabled={busy || selectedCount === 0 || Boolean(antiRevokeUnsupportedMessage)}>
                 {isAntiRevokeUninstalling ? '卸载中...' : '批量卸载'}
               </button>
             </div>
@@ -2672,6 +2726,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           onChange={(e) => {
             const value = e.target.value
             setWcdbLibPath(value)
+            setAntiRevokeUnsupportedMessage(null)
             scheduleConfigSave('wcdbLibPath', () => configService.setWcdbLibPath(value))
           }}
         />
