@@ -107,6 +107,17 @@ npm run dev
 
 ---
 
+## 源项目与致谢
+
+本项目基于 [hicccc77/WeFlow](https://github.com/hicccc77/WeFlow) 开发，感谢原项目作者及社区贡献者。Windows x64 内置 WCDB 数据层参考并改编自 [334456777/WeFlow](https://github.com/334456777/WeFlow/commit/2f804b806f66acaa09ffac6380a7c4b9385f44b8)，遵循该源仓库的 CC BY-NC-SA 4.0 许可，详见[该版本许可证](https://github.com/334456777/WeFlow/blob/2f804b806f66acaa09ffac6380a7c4b9385f44b8/LICENSE)。
+
+### 本分支相对源项目的主要改动
+
+- 新增 Rust WCDB 数据访问实现及 C ABI 兼容层，为 Windows x64 提供内置 `weflow_wcdb.dll`，并接入 Electron `wcdbCore` 的动态库加载与回退流程。
+- 对上游 Rust 数据层做裁剪和适配：移除未使用的图片密钥获取入口及 `weflow-core` 依赖，仅保留本应用需要的数据库能力。
+- 将内置数据库能力限制为只读；编辑、删除、导入、触发器和已读状态修改等写操作不由该内置实现支持。
+- 新增 Rust 构建脚本、Windows x64 资源打包配置和实现文档，详见 [Native WCDB backend](docs/native-db-backend.md) 与 [第三方组件说明](docs/third-party-components.md)。
+
 ## 贡献者
 
 感谢所有做出贡献的开发者！
